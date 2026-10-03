@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.25)
 project(ShuffleFabric
   VERSION 1.0.0
   DESCRIPTION "Vendor-neutral C++20 runtime for governing many-to-many shuffle traffic"
-  HOMEPAGE_URL "https://github.com/summonlabs/Shuffle-Traffic"
+  HOMEPAGE_URL "https://github.com/summonlabs/Shuffle-Fabric"
   LANGUAGES CXX)
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
