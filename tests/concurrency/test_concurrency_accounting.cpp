@@ -58,6 +58,10 @@ class Serialized {
     const std::lock_guard<std::mutex> guard{mutex_};
     return coordinator_->advance_tick();
   }
+  [[nodiscard]] Status cancel_shuffle(ErrorCode reason) {
+    const std::lock_guard<std::mutex> guard{mutex_};
+    return coordinator_->cancel_shuffle(reason);
+  }
 
  private:
   Coordinator* coordinator_;
@@ -317,19 +321,31 @@ SHUFFLE_TEST(concurrency, interleaved_cancellation_stops_accounting_cleanly) {
     }
   };
 
+  // The grants of this first wave stay uncommitted, so their edges are still
+  // open when the cancellation lands: however fast the workers are, the
+  // shuffle cannot complete first and leave nothing to cancel.
+  const auto held = serialized.next_wave();
+  REQUIRE_OK(held);
+  REQUIRE(!held.value().grants.empty());
+
   std::vector<std::thread> workers;
   workers.reserve(4);
   for (int index = 0; index < 4; ++index) {
     workers.emplace_back(worker);
   }
+  Status cancel_status;
   {
     const std::lock_guard<std::mutex> guard{cancel_mutex};
-    REQUIRE_OK(fixture.coordinator.cancel_shuffle(ErrorCode::Cancelled));
+    // Through the serialising wrapper like every other call: the coordinator
+    // is single-threaded, and the workers may be inside it right now.
+    cancel_status = serialized.cancel_shuffle(ErrorCode::Cancelled);
     cancelled.store(true, std::memory_order_relaxed);
   }
   for (std::thread& thread : workers) {
     thread.join();
   }
+  // Checked only once every worker has been joined.
+  REQUIRE_OK(cancel_status);
 
   const auto status = serialized.status();
   REQUIRE_OK(status);

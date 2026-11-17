@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -17,6 +18,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include "shuffle/fabric/hash.hpp"
@@ -690,4 +692,34 @@ SHUFFLE_TEST(durable_store, journal_larger_than_four_snapshots_is_refused) {
   DurableStore bounded(config);
   REQUIRE_ERROR(bounded.open(), ErrorCode::StateTooLarge);
   REQUIRE_ERROR(bounded.append(payload_for(1)), ErrorCode::InvalidState);
+}
+
+SHUFFLE_TEST(durable_store, compaction_waits_for_a_reader_of_the_snapshot_to_close) {
+  shuffle::test::TempDir root("durable-store-reader");
+  bool reader_opened = false;
+  bool compacted = false;
+  {
+    DurableStore store(store_config(root.path()));
+    REQUIRE_OK(store.open());
+    REQUIRE_OK(store.append(payload_for(1)));
+    REQUIRE_OK(store.compact(state_for(1), 1));
+    REQUIRE_OK(store.append(payload_for(2)));
+    {
+      // Another tool reading the store (an inspection, a scan) holds the
+      // snapshot open while the next compaction replaces it, and closes it
+      // shortly after.
+      std::ifstream reader(root.file("state.snapshot"), std::ios::binary);
+      reader_opened = reader.is_open();
+      std::thread writer([&store, &compacted] { compacted = store.compact(state_for(2), 2).ok(); });
+      std::this_thread::sleep_for(std::chrono::milliseconds(300));
+      reader.close();
+      writer.join();
+    }
+  }
+  REQUIRE(reader_opened);
+  // The compaction is not lost because a reader had the snapshot open for a moment.
+  REQUIRE(compacted);
+  DurableStore reopened(store_config(root.path()));
+  REQUIRE_OK(reopened.open());
+  REQUIRE_EQ(reopened.recovery().snapshot_sequence, std::uint64_t{2});
 }

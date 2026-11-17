@@ -371,11 +371,28 @@ void remove_quietly(const std::filesystem::path& path) {
     // so it is dropped first; if the swap then fails the destination still
     // holds the previous snapshot, which is what the caller must fall back to.
     remove_quietly(backup);
-    if (::ReplaceFileW(destination.c_str(), source.c_str(), backup.c_str(), REPLACEFILE_IGNORE_MERGE_ERRORS, nullptr,
-                       nullptr) == FALSE) {
-      return Status{make_error(ErrorCode::AtomicReplaceFailed, "ReplaceFileW could not install the new snapshot")};
+    // While a reader has the snapshot open (an inspection, an antivirus or
+    // indexing scan) the swap fails until the reader closes the file. Such a
+    // failure leaves both files under their own names, so the swap is retried
+    // for a bounded time (about 2 s) instead of failing the compaction. A
+    // directory in the way is not transient and fails at once.
+    for (int attempt = 0;; ++attempt) {
+      if (::ReplaceFileW(destination.c_str(), source.c_str(), backup.c_str(), REPLACEFILE_IGNORE_MERGE_ERRORS,
+                         nullptr, nullptr) != FALSE) {
+        return Status{};
+      }
+      const DWORD code = ::GetLastError();
+      const DWORD attributes = ::GetFileAttributesW(destination.c_str());
+      const bool directory =
+          attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+      const bool transient = (code == ERROR_ACCESS_DENIED || code == ERROR_SHARING_VIOLATION ||
+                              code == ERROR_LOCK_VIOLATION || code == ERROR_UNABLE_TO_REMOVE_REPLACED) &&
+                             !directory;
+      if (!transient || attempt >= 100) {
+        return Status{make_error(ErrorCode::AtomicReplaceFailed, "ReplaceFileW could not install the new snapshot")};
+      }
+      ::Sleep(20);
     }
-    return Status{};
   }
   if (::MoveFileExW(source.c_str(), destination.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) == FALSE) {
     return Status{make_error(ErrorCode::AtomicReplaceFailed, "MoveFileExW could not install the new snapshot")};
